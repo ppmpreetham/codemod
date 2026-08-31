@@ -128,53 +128,57 @@ pub async fn find_dry_run_only_codemod_dependency(
 /// Validate a workflow definition
 pub fn validate_workflow(workflow: &Workflow, package_path: &Path) -> Result<()> {
     // Check that all node IDs are unique
-    let mut node_ids = HashSet::new();
-    for node in &workflow.nodes {
-        if !node_ids.insert(&node.id) {
-            return Err(Error::WorkflowValidation(format!(
-                "Duplicate node ID: {}",
-                node.id
-            )));
-        }
+    let mut node_ids = HashSet::with_capacity(workflow.nodes.len());
+    if let Some(dup) = workflow.nodes.iter().find(|n| !node_ids.insert(&n.id)) {
+        return Err(Error::WorkflowValidation(format!(
+            "Duplicate node ID: {}",
+            dup.id
+        )));
     }
 
     // Check that all template IDs are unique
-    let mut template_ids = HashSet::new();
-    for template in &workflow.templates {
-        if !template_ids.insert(&template.id) {
-            return Err(Error::WorkflowValidation(format!(
-                "Duplicate template ID: {}",
-                template.id
-            )));
-        }
+    let mut template_ids = HashSet::with_capacity(workflow.templates.len());
+    if let Some(dup) = workflow
+        .templates
+        .iter()
+        .find(|t| !template_ids.insert(&t.id))
+    {
+        return Err(Error::WorkflowValidation(format!(
+            "Duplicate template ID: {}",
+            dup.id
+        )));
     }
 
     // Check that all dependencies exist
-    for node in &workflow.nodes {
-        for dep_id in &node.depends_on {
-            if !node_ids.contains(dep_id) {
-                return Err(Error::WorkflowValidation(format!(
-                    "Node {} depends on non-existent node: {}",
-                    node.id, dep_id
-                )));
-            }
+    workflow.nodes.iter().try_for_each(|node| {
+        if let Some(missing_dep) = node
+            .depends_on
+            .iter()
+            .find(|dep_id| !node_ids.contains(*dep_id))
+        {
+            return Err(Error::WorkflowValidation(format!(
+                "Node {} depends on non-existent node: {}",
+                node.id, missing_dep
+            )));
         }
-    }
+        Ok(())
+    })?;
 
     // Check for cyclic dependencies
     detect_cycles(&workflow.nodes)?;
 
     // Check that all template references are valid
-    for node in &workflow.nodes {
-        for step in &node.steps {
-            if let StepAction::UseTemplate(template_use) = &step.action {
+    workflow.nodes.iter().flat_map(|n| n.steps.iter().map(move |s| (n, s))).try_for_each(|(node, step)| {
+        match &step.action {
+            StepAction::UseTemplate(template_use) => {
                 if !template_ids.contains(&template_use.template) {
                     return Err(Error::WorkflowValidation(format!(
                         "Step {} in node {} uses non-existent template: {}",
                         step.name, node.id, template_use.template
                     )));
                 }
-            } else if let StepAction::JSAstGrep(js_step) = &step.action {
+            }
+            StepAction::JSAstGrep(js_step) => {
                 validate_workflow_relative_path(&js_step.js_file, "js-ast-grep.js_file")?;
                 validate_workflow_glob_patterns(&js_step.include, "js-ast-grep.include")?;
                 validate_workflow_glob_patterns(&js_step.exclude, "js-ast-grep.exclude")?;
@@ -195,7 +199,8 @@ pub fn validate_workflow(workflow: &Workflow, package_path: &Path) -> Result<()>
                         js_file_path.display()
                     )));
                 }
-            } else if let StepAction::AstGrep(ast_step) = &step.action {
+            }
+            StepAction::AstGrep(ast_step) => {
                 validate_workflow_relative_path(&ast_step.config_file, "ast-grep.config_file")?;
                 validate_workflow_glob_patterns(&ast_step.include, "ast-grep.include")?;
                 validate_workflow_glob_patterns(&ast_step.exclude, "ast-grep.exclude")?;
@@ -210,9 +215,9 @@ pub fn validate_workflow(workflow: &Workflow, package_path: &Path) -> Result<()>
                         ast_file_path.display()
                     )));
                 }
-            } else if let StepAction::Shard(shard) = &step.action {
+            }
+            StepAction::Shard(shard) => {
                 use butterflow_models::step::ShardMethod;
-                // Validate file discovery — shared across all methods
                 if shard.file_pattern.is_none() && shard.js_ast_grep.is_none() {
                     return Err(Error::WorkflowValidation(format!(
                         "Step '{}' in node '{}': shard step requires either 'file_pattern' or 'js-ast-grep'",
@@ -220,18 +225,9 @@ pub fn validate_workflow(workflow: &Workflow, package_path: &Path) -> Result<()>
                     )));
                 }
                 if let Some(js_ast_grep) = &shard.js_ast_grep {
-                    validate_workflow_relative_path(
-                        &js_ast_grep.js_file,
-                        "shard.js-ast-grep.js_file",
-                    )?;
-                    validate_workflow_glob_patterns(
-                        &js_ast_grep.include,
-                        "shard.js-ast-grep.include",
-                    )?;
-                    validate_workflow_glob_patterns(
-                        &js_ast_grep.exclude,
-                        "shard.js-ast-grep.exclude",
-                    )?;
+                    validate_workflow_relative_path(&js_ast_grep.js_file, "shard.js-ast-grep.js_file")?;
+                    validate_workflow_glob_patterns(&js_ast_grep.include, "shard.js-ast-grep.include")?;
+                    validate_workflow_glob_patterns(&js_ast_grep.exclude, "shard.js-ast-grep.exclude")?;
                     if let Some(base_path) = &js_ast_grep.base_path {
                         validate_workflow_relative_path(base_path, "shard.js-ast-grep.base_path")?;
                     }
@@ -276,7 +272,8 @@ pub fn validate_workflow(workflow: &Workflow, package_path: &Path) -> Result<()>
                 if let Some(file_pattern) = &shard.file_pattern {
                     validate_workflow_glob_pattern(file_pattern, "shard.file_pattern")?;
                 }
-            } else if let StepAction::InstallSkill(install_skill) = &step.action {
+            }
+            StepAction::InstallSkill(install_skill) => {
                 if install_skill.package.trim().is_empty() {
                     return Err(Error::WorkflowValidation(format!(
                         "Step {} in node {} has invalid install-skill package value",
@@ -306,11 +303,13 @@ pub fn validate_workflow(workflow: &Workflow, package_path: &Path) -> Result<()>
                     }
                 }
             }
+            _ => {}
         }
-    }
+        Ok(())
+    })?;
 
     // Check matrix strategies
-    for node in &workflow.nodes {
+    workflow.nodes.iter().try_for_each(|node| {
         if let Some(strategy) = &node.strategy
             && strategy.values.is_none()
             && strategy.from_state.is_none()
@@ -320,9 +319,8 @@ pub fn validate_workflow(workflow: &Workflow, package_path: &Path) -> Result<()>
                 node.id
             )));
         }
-    }
-
-    Ok(())
+        Ok(())
+    })
 }
 
 /// Detect cycles in the dependency graph
