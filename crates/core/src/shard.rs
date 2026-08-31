@@ -233,8 +233,6 @@ fn parse_chunk_index(name: &str) -> Option<usize> {
     name.rsplit('-').next()?.parse().ok()
 }
 
-/// Create new shards for directory-grouped files, starting chunk indices after
-/// the highest existing index per directory.
 fn create_new_directory_shards(
     new_files: &[String],
     search_base: &Path,
@@ -245,27 +243,32 @@ fn create_new_directory_shards(
 ) -> Result<Vec<ShardResult>, String> {
     let search_base_rel = search_base.strip_prefix(target_path).unwrap_or(search_base);
 
-    // Group new files by directory
-    let mut groups: HashMap<String, Vec<String>> = HashMap::new();
+    let mut groups: HashMap<String, Vec<&str>> = HashMap::new();
+
     for file in new_files {
-        let group_key = extract_directory_group(file, search_base_rel);
-        groups.entry(group_key).or_default().push(file.clone());
+        let group = extract_directory_group(file, search_base_rel);
+        groups.entry(group).or_default().push(file);
     }
 
-    let mut group_names: Vec<String> = groups.keys().cloned().collect();
-    group_names.sort();
+    let mut group_names: Vec<_> = groups.keys().map(String::as_str).collect();
+    group_names.sort_unstable();
 
+    let is_single_dot_group = group_names.len() == 1 && group_names[0] == ".";
     let mut shards = Vec::new();
-    for group_name in &group_names {
-        let mut files = groups.get(group_name).cloned().unwrap_or_default();
-        files.sort();
 
-        let chunks = bin_pack_files(&files, max_files_per_shard, min_shard_size);
-        let start_index = max_chunk_index.get(group_name).map(|i| i + 1).unwrap_or(0);
+    for group_name in group_names {
+        let files = groups.get(group_name).unwrap();
+        let owned_files: Vec<String> = files.iter().map(|&file| file.to_owned()).collect();
+        let chunks = bin_pack_files(&owned_files, max_files_per_shard, min_shard_size);
+
+        let start_index = max_chunk_index
+            .get(group_name)
+            .map(|index| index + 1)
+            .unwrap_or(0);
 
         for (i, shard_files) in chunks.into_iter().enumerate() {
             let chunk_idx = start_index + i;
-            let name = if group_names.len() == 1 && group_name == "." {
+            let name = if is_single_dot_group {
                 format!("shard-{chunk_idx}")
             } else {
                 format!("{group_name}-{chunk_idx}")
@@ -273,9 +276,9 @@ fn create_new_directory_shards(
 
             shards.push(ShardResult {
                 name,
-                _meta_shard: 0, // re-indexed by caller
+                _meta_shard: 0,
                 _meta_files: shard_files,
-                directory: Some(group_name.clone()),
+                directory: Some(group_name.to_owned()),
                 team: None,
                 extra: HashMap::new(),
             });
