@@ -350,7 +350,7 @@ pub fn collect_files_with_pattern(
     file_pattern: &str,
 ) -> Result<Vec<PathBuf>, String> {
     crate::utils::validate_workflow_glob_pattern(file_pattern, "shard.file_pattern")
-        .map_err(|error| error.to_string())?;
+        .map_err(|e| e.to_string())?;
 
     let mut override_builder = OverrideBuilder::new(base_path);
     override_builder
@@ -360,8 +360,7 @@ pub fn collect_files_with_pattern(
         .build()
         .map_err(|e| format!("Failed to build glob overrides: {}", e))?;
 
-    let mut builder = WalkBuilder::new(base_path);
-    builder
+    let walker = WalkBuilder::new(base_path)
         .overrides(overrides)
         .follow_links(false)
         .git_ignore(true)
@@ -370,26 +369,25 @@ pub fn collect_files_with_pattern(
         .require_git(false)
         .parents(true)
         .ignore(true)
-        .hidden(false);
+        .hidden(false)
+        .threads(1)
+        .build();
 
-    let walker = builder.threads(1).build();
-    let mut files = Vec::new();
-
-    for entry in walker {
-        match entry {
-            Ok(dir_entry) => {
-                if dir_entry.file_type().is_some_and(|ft| ft.is_file()) {
-                    files.push(dir_entry.into_path());
-                }
+    let mut files = walker
+        .filter_map(|entry| match entry {
+            Ok(dir_entry) if dir_entry.file_type().is_some_and(|ft| ft.is_file()) => {
+                Some(dir_entry.into_path())
             }
+            Ok(_) => None,
             Err(err) => {
                 eprintln!("Walk error during shard evaluation: {}", err);
+                None
             }
-        }
-    }
+        })
+        .collect::<Vec<_>>();
 
     // Sort for deterministic output
-    files.sort();
+    files.sort_unstable();
     Ok(files)
 }
 
@@ -425,30 +423,32 @@ fn evaluate_directory_shards(
     let search_base_rel = search_base.strip_prefix(target_path).unwrap_or(search_base);
 
     // Group files by their immediate subdirectory under target
-    let mut groups: HashMap<String, Vec<String>> = HashMap::new();
+    let mut groups: HashMap<String, Vec<&str>> = HashMap::with_capacity(relative_files.len());
 
     for file in relative_files {
         let group_key = extract_directory_group(file, search_base_rel);
-        groups.entry(group_key).or_default().push(file.clone());
+        groups.entry(group_key).or_default().push(file.as_str());
     }
 
     // Sort groups by name for deterministic output
     let mut group_names: Vec<String> = groups.keys().cloned().collect();
-    group_names.sort();
+    group_names.sort_unstable();
 
     let mut shards = Vec::new();
+    let is_single_dot_group = group_names.len() == 1 && group_names[0] == ".";
 
-    for group_name in &group_names {
-        let mut files = groups.get(group_name).cloned().unwrap_or_default();
-        files.sort();
+    for group_name in group_names {
+        let mut files = groups.remove(&group_name).unwrap();
+        files.sort_unstable();
 
-        let group_shards = bin_pack_files(&files, max_files_per_shard, min_shard_size);
+        let owned_files: Vec<String> = files.into_iter().map(str::to_owned).collect();
+        let group_shards = bin_pack_files(&owned_files, max_files_per_shard, min_shard_size);
 
         for (i, shard_files) in group_shards.into_iter().enumerate() {
-            let name = if group_names.len() == 1 && group_name == "." {
-                format!("shard-{}", i)
+            let name = if is_single_dot_group {
+                format!("shard-{i}")
             } else {
-                format!("{}-{}", group_name, i)
+                format!("{group_name}-{i}")
             };
 
             shards.push(ShardResult {
@@ -479,30 +479,29 @@ fn evaluate_codeowner_shards(
     };
 
     // Group files by owning team
-    let mut groups: HashMap<String, Vec<String>> = HashMap::new();
+    let mut groups: HashMap<String, Vec<&str>> = HashMap::new();
 
     for file in relative_files {
-        let team = match_codeowner(file, &rules).unwrap_or_else(|| "unowned".to_string());
-        groups.entry(team).or_default().push(file.clone());
+        let team = match_codeowner(file, &rules).unwrap_or_else(|| "unowned".to_owned());
+        groups.entry(team).or_default().push(file.as_str());
     }
 
     // Sort groups by team name for deterministic output
     let mut team_names: Vec<String> = groups.keys().cloned().collect();
-    team_names.sort();
+    team_names.sort_unstable();
 
     let mut shards = Vec::new();
 
-    for team_name in &team_names {
-        let mut files = groups.get(team_name).cloned().unwrap_or_default();
-        files.sort();
-
-        let group_shards = bin_pack_files(&files, max_files_per_shard, min_shard_size);
+    for team_name in team_names {
+        let mut files = groups.remove(&team_name).unwrap();
+        files.sort_unstable();
+        let owned_files: Vec<String> = files.into_iter().map(str::to_owned).collect();
+        let group_shards = bin_pack_files(&owned_files, max_files_per_shard, min_shard_size);
+        let sanitized = sanitize_team_name(&team_name);
 
         for (i, shard_files) in group_shards.into_iter().enumerate() {
-            let name = format!("{}-{}", sanitize_team_name(team_name), i);
-
             shards.push(ShardResult {
-                name,
+                name: format!("{sanitized}-{i}"),
                 _meta_shard: shards.len(),
                 _meta_files: shard_files,
                 directory: None,
@@ -522,19 +521,27 @@ fn bin_pack_files(files: &[String], max_size: usize, min_size: Option<usize>) ->
         return Vec::new();
     }
 
-    let mut chunks: Vec<Vec<String>> = files.chunks(max_size).map(|c| c.to_vec()).collect();
+    let len = files.len();
+    let full_chunks = len / max_size;
+    let remainder = len % max_size;
 
-    // Merge trailing runt into previous chunk
-    if let Some(min) = min_size
-        && chunks.len() > 1
-    {
-        let last_len = chunks.last().map(|c| c.len()).unwrap_or(0);
-        if last_len < min {
-            let last = chunks.pop().unwrap();
-            if let Some(prev) = chunks.last_mut() {
-                prev.extend(last);
-            }
-        }
+    let merge_last =
+        min_size.is_some_and(|min| full_chunks > 0 && remainder > 0 && remainder < min);
+
+    let chunk_count = full_chunks + usize::from(remainder > 0 && !merge_last);
+    let mut chunks = Vec::with_capacity(chunk_count);
+    let mut start = 0;
+
+    for i in 0..chunk_count {
+        let size = if merge_last && i == chunk_count - 1 {
+            len - start
+        } else {
+            max_size
+        };
+
+        let end = start + size;
+        chunks.push(files[start..end].to_vec());
+        start = end;
     }
 
     chunks
