@@ -539,7 +539,7 @@ fn bin_pack_files(files: &[String], max_size: usize, min_size: Option<usize>) ->
             max_size
         };
 
-        let end = start + size;
+        let end = std::cmp::min(start + size, len);
         chunks.push(files[start..end].to_vec());
         start = end;
     }
