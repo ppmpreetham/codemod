@@ -399,23 +399,21 @@ fn dfs_cycle_detect<'a>(
 
 /// Parse parameters from command line arguments
 pub fn parse_params(params: &[String]) -> Result<HashMap<String, serde_json::Value>> {
-    let mut result = HashMap::new();
+    params
+        .iter()
+        .map(|param| {
+            let (key, val_str) = param.split_once('=').ok_or_else(|| {
+                Error::Other(format!(
+                    "Invalid parameter format: {param}. Expected format: key=value"
+                ))
+            })?;
 
-    for param in params {
-        let parts: Vec<&str> = param.splitn(2, '=').collect();
-        if parts.len() != 2 {
-            return Err(Error::Other(format!(
-                "Invalid parameter format: {param}. Expected format: key=value"
-            )));
-        }
+            let value = serde_json::from_str(val_str)
+                .unwrap_or_else(|_| serde_json::Value::String(val_str.to_string()));
 
-        let value = serde_json::from_str(parts[1])
-            .unwrap_or_else(|_| serde_json::Value::String(parts[1].to_string()));
-
-        result.insert(parts[0].to_string(), value);
-    }
-
-    Ok(result)
+            Ok((key.to_string(), value))
+        })
+        .collect()
 }
 
 /// Get environment variables as a HashMap
