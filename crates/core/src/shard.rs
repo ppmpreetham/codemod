@@ -233,6 +233,8 @@ fn parse_chunk_index(name: &str) -> Option<usize> {
     name.rsplit('-').next()?.parse().ok()
 }
 
+/// Create new shards for directory-grouped files, starting chunk indices after
+/// the highest existing index per directory.
 fn create_new_directory_shards(
     new_files: &[String],
     search_base: &Path,
@@ -243,32 +245,27 @@ fn create_new_directory_shards(
 ) -> Result<Vec<ShardResult>, String> {
     let search_base_rel = search_base.strip_prefix(target_path).unwrap_or(search_base);
 
-    let mut groups: HashMap<String, Vec<&str>> = HashMap::new();
-
+    // Group new files by directory
+    let mut groups: HashMap<String, Vec<String>> = HashMap::new();
     for file in new_files {
-        let group = extract_directory_group(file, search_base_rel);
-        groups.entry(group).or_default().push(file);
+        let group_key = extract_directory_group(file, search_base_rel);
+        groups.entry(group_key).or_default().push(file.clone());
     }
 
-    let mut group_names: Vec<_> = groups.keys().map(String::as_str).collect();
-    group_names.sort_unstable();
+    let mut group_names: Vec<String> = groups.keys().cloned().collect();
+    group_names.sort();
 
-    let is_single_dot_group = group_names.len() == 1 && group_names[0] == ".";
     let mut shards = Vec::new();
+    for group_name in &group_names {
+        let mut files = groups.get(group_name).cloned().unwrap_or_default();
+        files.sort();
 
-    for group_name in group_names {
-        let files = groups.get(group_name).unwrap();
-        let owned_files: Vec<String> = files.iter().map(|&file| file.to_owned()).collect();
-        let chunks = bin_pack_files(&owned_files, max_files_per_shard, min_shard_size);
-
-        let start_index = max_chunk_index
-            .get(group_name)
-            .map(|index| index + 1)
-            .unwrap_or(0);
+        let chunks = bin_pack_files(&files, max_files_per_shard, min_shard_size);
+        let start_index = max_chunk_index.get(group_name).map(|i| i + 1).unwrap_or(0);
 
         for (i, shard_files) in chunks.into_iter().enumerate() {
             let chunk_idx = start_index + i;
-            let name = if is_single_dot_group {
+            let name = if group_names.len() == 1 && group_name == "." {
                 format!("shard-{chunk_idx}")
             } else {
                 format!("{group_name}-{chunk_idx}")
@@ -276,9 +273,9 @@ fn create_new_directory_shards(
 
             shards.push(ShardResult {
                 name,
-                _meta_shard: 0,
+                _meta_shard: 0, // re-indexed by caller
                 _meta_files: shard_files,
-                directory: Some(group_name.to_owned()),
+                directory: Some(group_name.clone()),
                 team: None,
                 extra: HashMap::new(),
             });
@@ -303,38 +300,44 @@ fn create_new_codeowner_shards(
         Err(_) => Vec::new(),
     };
 
-    let mut groups: HashMap<String, Vec<String>> = HashMap::new();
+    let mut groups: HashMap<String, Vec<&str>> = HashMap::new();
+
     for file in new_files {
-        let team = match_codeowner(file, &rules).unwrap_or_else(|| "unowned".to_string());
-        groups.entry(team).or_default().push(file.clone());
+        let team = match_codeowner(file, &rules).unwrap_or_else(|| "unowned".to_owned());
+
+        groups.entry(team).or_default().push(file);
     }
 
     let mut team_names: Vec<String> = groups.keys().cloned().collect();
-    team_names.sort();
+    team_names.sort_unstable();
 
-    let mut shards = Vec::new();
-    for team_name in &team_names {
-        let mut files = groups.get(team_name).cloned().unwrap_or_default();
-        files.sort();
+    let shards = team_names
+        .into_iter()
+        .flat_map(|team_name| {
+            let mut files = groups.remove(&team_name).unwrap();
+            files.sort_unstable();
 
-        let chunks = bin_pack_files(&files, max_files_per_shard, min_shard_size);
-        let sanitized = sanitize_team_name(team_name);
-        let start_index = max_chunk_index.get(team_name).map(|i| i + 1).unwrap_or(0);
+            let owned_files: Vec<String> = files.into_iter().map(str::to_owned).collect();
+            let chunks = bin_pack_files(&owned_files, max_files_per_shard, min_shard_size);
+            let sanitized = sanitize_team_name(&team_name);
+            let start_index = max_chunk_index
+                .get(&team_name)
+                .map(|index| index + 1)
+                .unwrap_or(0);
 
-        for (i, shard_files) in chunks.into_iter().enumerate() {
-            let chunk_idx = start_index + i;
-            let name = format!("{sanitized}-{chunk_idx}");
-
-            shards.push(ShardResult {
-                name,
-                _meta_shard: 0,
-                _meta_files: shard_files,
-                directory: None,
-                team: Some(team_name.clone()),
-                extra: HashMap::new(),
-            });
-        }
-    }
+            chunks
+                .into_iter()
+                .enumerate()
+                .map(move |(i, shard_files)| ShardResult {
+                    name: format!("{sanitized}-{}", start_index + i),
+                    _meta_shard: 0,
+                    _meta_files: shard_files,
+                    directory: None,
+                    team: Some(team_name.clone()),
+                    extra: HashMap::new(),
+                })
+        })
+        .collect();
 
     Ok(shards)
 }
