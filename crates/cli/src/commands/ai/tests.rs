@@ -39,6 +39,8 @@ use std::sync::{Arc, LazyLock, Mutex};
 use tokio::runtime::Runtime;
 use tokio::sync::oneshot;
 
+/// Serializes tests that mutate the process environment; `EnvRestoreGuard`
+/// callers must hold this lock.
 static ENV_GUARD: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 #[derive(Clone)]
@@ -138,10 +140,13 @@ struct EnvRestoreGuard {
 }
 
 impl EnvRestoreGuard {
+    /// Set `vars` for the duration of the test, restoring prior values on drop.
+    /// Callers must hold `ENV_GUARD` so no other test touches the env concurrently.
     fn set(vars: &[(&'static str, String)]) -> Self {
         let mut saved = Vec::with_capacity(vars.len());
         for (key, value) in vars {
             saved.push((*key, std::env::var(key).ok()));
+            // SAFETY: caller holds ENV_GUARD, so no concurrent env access.
             unsafe {
                 std::env::set_var(key, value);
             }
@@ -153,6 +158,7 @@ impl EnvRestoreGuard {
 impl Drop for EnvRestoreGuard {
     fn drop(&mut self) {
         for (key, previous_value) in &self.saved {
+            // SAFETY: the creating test held ENV_GUARD through this drop.
             unsafe {
                 match previous_value {
                     Some(value) => std::env::set_var(key, value),

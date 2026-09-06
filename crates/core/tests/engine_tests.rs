@@ -104,8 +104,10 @@ struct EnvVarGuard {
 }
 
 impl EnvVarGuard {
+    /// Callers' tests must be `#[serial]` so no other test touches the env.
     fn unset(key: &str) -> Self {
         let original = std::env::var(key).ok();
+        // SAFETY: caller's test is #[serial], so no concurrent env access.
         unsafe {
             std::env::remove_var(key);
         }
@@ -115,8 +117,10 @@ impl EnvVarGuard {
         }
     }
 
+    /// Same requirement as [`EnvVarGuard::unset`]: caller's test must be `#[serial]`.
     fn set(key: &str, value: &str) -> Self {
         let original = std::env::var(key).ok();
+        // SAFETY: caller's test is #[serial], so no concurrent env access.
         unsafe {
             std::env::set_var(key, value);
         }
@@ -129,6 +133,8 @@ impl EnvVarGuard {
 
 impl Drop for EnvVarGuard {
     fn drop(&mut self) {
+        // SAFETY: the test that created this guard is #[serial] and holds the
+        // guard until after this drop, so no concurrent env access.
         unsafe {
             if let Some(value) = &self.original {
                 std::env::set_var(&self.key, value);
@@ -7935,12 +7941,14 @@ async fn test_expression_resolution_nonexistent_variable() {
 // TODO: test_runtime_cycle_detection
 
 #[test]
+#[serial]
 fn js_ast_grep_idle_timeout_uses_default_and_respects_env_override() {
     let _guard = EnvVarGuard::unset("CODEMOD_JS_AST_GREP_IDLE_TIMEOUT_MS");
     assert_eq!(
         js_ast_grep_idle_timeout(),
         Duration::from_millis(JS_AST_GREP_IDLE_TIMEOUT_MS_DEFAULT)
     );
+    // SAFETY: test is #[serial], so no concurrent env access.
     unsafe {
         std::env::set_var("CODEMOD_JS_AST_GREP_IDLE_TIMEOUT_MS", "1234");
     }

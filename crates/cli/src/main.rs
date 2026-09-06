@@ -410,6 +410,7 @@ async fn run_cli() -> Result<()> {
             .map(|params| params.disable_analytics)
             .unwrap_or(false)
     {
+        // SAFETY: runs on the main thread during CLI startup, before threads spawn.
         unsafe {
             std::env::set_var("DISABLE_ANALYTICS", "true");
         }

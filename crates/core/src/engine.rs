@@ -4568,8 +4568,11 @@ author: test
     }
 
     impl EnvVarGuard {
+        /// Unset `key` for the duration of the test, restoring it on drop.
+        /// Callers' tests must be `#[serial]` so no other test touches the env.
         fn unset(key: &'static str) -> Self {
             let original = std::env::var(key).ok();
+            // SAFETY: caller's test is #[serial], so no concurrent env access.
             unsafe {
                 std::env::remove_var(key);
             }
@@ -4579,6 +4582,7 @@ author: test
 
     impl Drop for EnvVarGuard {
         fn drop(&mut self) {
+            // SAFETY: creating test is #[serial] and holds the guard through this drop.
             unsafe {
                 if let Some(original) = &self.original {
                     std::env::set_var(self.key, original);
@@ -4597,6 +4601,7 @@ author: test
             js_ast_grep_idle_timeout(),
             Duration::from_millis(JS_AST_GREP_IDLE_TIMEOUT_MS_DEFAULT)
         );
+        // SAFETY: test is #[serial], so no concurrent env access.
         unsafe {
             std::env::set_var("CODEMOD_JS_AST_GREP_IDLE_TIMEOUT_MS", "1234");
         }
@@ -4613,6 +4618,7 @@ author: test
         let _git_askpass_guard = EnvVarGuard::unset("GIT_ASKPASS");
         let _http_proxy_guard = EnvVarGuard::unset("HTTP_PROXY");
 
+        // SAFETY: test is #[serial], so no concurrent env access.
         unsafe {
             std::env::set_var("BUTTERFLOW_API_AUTH_TOKEN", "local-token");
             std::env::set_var("LLM_API_KEY", "local-llm-key");
@@ -4635,6 +4641,7 @@ author: test
             Some("http://local-llm.example/v1")
         );
 
+        // SAFETY: test is #[serial], so no concurrent env access.
         unsafe {
             std::env::set_var("BUTTERFLOW_STATE_BACKEND", "cloud");
             std::env::set_var("GIT_ASKPASS", "/tmp/codemod-git-askpass");
