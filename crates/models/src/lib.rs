@@ -12,7 +12,7 @@ pub mod variable;
 pub mod workflow;
 
 // Re-export types
-pub use error::Error;
+pub use error::{Error, WorkflowParseError};
 pub use node::Node;
 pub use runtime::{Runtime, RuntimeType};
 pub use schema::{SimpleSchema, SimpleSchemaProperty, SimpleSchemaType, SimpleSchemaVariant};

@@ -12,6 +12,7 @@ use butterflow_models::step::UseAstGrep;
 use butterflow_models::step::UseJSAstGrep;
 use butterflow_models::strategy::StrategyType;
 use butterflow_models::{Error, Node, Step, Strategy, Template, TemplateOutput, Workflow};
+use serial_test::serial;
 
 #[test]
 fn test_parse_workflow_file_yaml() {
@@ -109,8 +110,8 @@ fn test_parse_workflow_file_invalid() {
     // Verify that parsing fails
     assert!(result.is_err());
     match result {
-        Err(Error::WorkflowParse { path, .. }) => {
-            assert_eq!(path, file_path);
+        Err(Error::WorkflowParse(parse_error)) => {
+            assert_eq!(parse_error.path, file_path);
         }
         _ => panic!("Expected WorkflowParse error"),
     }
@@ -680,8 +681,10 @@ fn test_validate_workflow_complex_cyclic_dependency() {
 }
 
 #[test]
+#[serial]
 fn test_get_env_vars() {
     // Set a test environment variable
+    // SAFETY: test is #[serial], so no other test touches the env concurrently.
     unsafe {
         env::set_var("BUTTERFLOW_TEST_VAR", "test_value");
     }
@@ -696,6 +699,7 @@ fn test_get_env_vars() {
     );
 
     // Clean up
+    // SAFETY: test is #[serial], so no other test touches the env concurrently.
     unsafe {
         env::remove_var("BUTTERFLOW_TEST_VAR");
     }

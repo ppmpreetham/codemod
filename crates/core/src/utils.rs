@@ -6,7 +6,7 @@ use std::path::{Component, Path, PathBuf};
 use butterflow_models::step::{SemanticAnalysisConfig, SemanticAnalysisMode, StepAction};
 use serde_yaml;
 
-use butterflow_models::{Error, Node, Result, Workflow};
+use butterflow_models::{Error, Node, Result, Workflow, WorkflowParseError};
 
 use crate::{
     engine::CodemodDependency, nested_codemod_service::NestedCodemodService,
@@ -100,7 +100,7 @@ pub fn parse_workflow_file<P: AsRef<Path>>(path: P) -> Result<Workflow> {
                 Ok(workflow) => Ok(workflow),
                 Err(json_err) => {
                     let yaml_location = yaml_err.location();
-                    Err(Error::WorkflowParse {
+                    Err(Error::WorkflowParse(Box::new(WorkflowParseError {
                         path: path.as_ref().to_path_buf(),
                         yaml_error: yaml_err.to_string().into_boxed_str(),
                         yaml_line: yaml_location.as_ref().map(|location| location.line()),
@@ -108,7 +108,7 @@ pub fn parse_workflow_file<P: AsRef<Path>>(path: P) -> Result<Workflow> {
                         json_error: json_err.to_string().into_boxed_str(),
                         json_line: Some(json_err.line()),
                         json_column: Some(json_err.column()),
-                    })
+                    })))
                 }
             }
         }
