@@ -418,3 +418,55 @@ async fn handle_callback(
             .unwrap()),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn callback_response(query: &str) -> Response<Body> {
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri(format!("/callback?{query}"))
+            .body(Body::empty())
+            .expect("request should build");
+        let tx: Arc<tokio::sync::Mutex<Option<oneshot::Sender<CallbackData>>>> =
+            Arc::new(tokio::sync::Mutex::new(None));
+        handle_callback(request, tx)
+            .await
+            .expect("handler should not fail")
+    }
+
+    /// Attacker-controlled error params must render as text, not HTML.
+    #[tokio::test]
+    async fn callback_error_params_are_rendered_as_escaped_text() {
+        let response = callback_response(
+            "error=%3Cscript%3Ealert(1)%3C/script%3E&error_description=%3Cimg%20src%3Dx%20onerror%3Dalert(2)%3E",
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = hyper::body::to_bytes(response.into_body()).await.unwrap();
+        let html = String::from_utf8(body.to_vec()).unwrap();
+
+        // The payloads survive as readable text...
+        assert!(html.contains("Error: &lt;script&gt;alert(1)&lt;/script&gt;"));
+        assert!(html.contains("&lt;img src=x onerror=alert(2)&gt;"));
+        // ...but must not appear as markup anywhere in the page.
+        assert!(!html.contains("<script>alert(1)"));
+        assert!(!html.contains("<img src=x"));
+    }
+
+    /// A benign error message must still be displayed verbatim.
+    #[tokio::test]
+    async fn callback_error_page_shows_benign_error_text() {
+        let response =
+            callback_response("error=access_denied&error_description=User+cancelled").await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = hyper::body::to_bytes(response.into_body()).await.unwrap();
+        let html = String::from_utf8(body.to_vec()).unwrap();
+
+        assert!(html.contains("Error: access_denied"));
+        assert!(html.contains("Description: User cancelled"));
+    }
+}
