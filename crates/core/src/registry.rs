@@ -938,10 +938,12 @@ mod tests {
         let live = client.package_lock(&cache_dir.path().join("live")).await;
         let locks = client.package_locks.lock().await;
         assert_eq!(locks.len(), 1);
-        assert!(locks
-            .get(&cache_dir.path().join("live"))
-            .and_then(Weak::upgrade)
-            .is_some());
+        assert!(
+            locks
+                .get(&cache_dir.path().join("live"))
+                .and_then(Weak::upgrade)
+                .is_some()
+        );
         drop(locks);
         drop(live);
     }
