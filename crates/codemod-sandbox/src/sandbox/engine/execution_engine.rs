@@ -17,7 +17,7 @@ use crate::sandbox::runtime_module::{
     RuntimeEvent, RuntimeEventCallback, RuntimeEventKind, RuntimeHooksContext, RuntimeModule,
 };
 use crate::utils::quickjs_utils::maybe_promise;
-use crate::workflow_global::{SharedStateContext, WorkflowGlobalModule};
+use crate::workflow_global::{SharedStateContext, StepIdContext, WorkflowGlobalModule};
 use ast_grep_config::RuleConfig;
 use ast_grep_core::AstGrep;
 use ast_grep_core::matcher::MatcherExt;
@@ -242,6 +242,8 @@ pub struct JssgExecutionOptions<'a, R> {
     pub llm_request_handler: Option<LlmRequestHandler>,
     /// Optional shared state context for cross-thread state communication
     pub shared_state_context: Option<SharedStateContext>,
+    /// Workflow step id recorded with `setStepOutput` calls made by this execution.
+    pub step_id: Option<String>,
     /// Optional runtime event callback for codemod:runtime hook emissions
     pub runtime_event_callback: Option<RuntimeEventCallback>,
     /// Optional cancellation flag exposed to codemod:runtime.isCanceled()
@@ -544,6 +546,12 @@ where
             },
         })?;
 
+        ctx.store_userdata(StepIdContext(options.step_id.clone())).map_err(|e| ExecutionError::Runtime {
+            source: crate::sandbox::errors::RuntimeError::InitializationFailed {
+                message: format!("Failed to store StepIdContext: {:?}", e),
+            },
+        })?;
+
         ctx.store_userdata(runtime_hooks_context.clone()).map_err(|e| ExecutionError::Runtime {
             source: crate::sandbox::errors::RuntimeError::InitializationFailed {
                 message: format!("Failed to store RuntimeHooksContext: {:?}", e),
@@ -830,6 +838,12 @@ where
             },
         })?;
 
+        ctx.store_userdata(StepIdContext::default()).map_err(|e| ExecutionError::Runtime {
+            source: crate::sandbox::errors::RuntimeError::InitializationFailed {
+                message: format!("Failed to store StepIdContext: {:?}", e),
+            },
+        })?;
+
         ctx.store_userdata(runtime_hooks_context.clone()).map_err(|e| ExecutionError::Runtime {
             source: crate::sandbox::errors::RuntimeError::InitializationFailed {
                 message: format!("Failed to store RuntimeHooksContext: {:?}", e),
@@ -1009,6 +1023,12 @@ where
         ctx.store_userdata(SharedStateContext::default()).map_err(|e| ExecutionError::Runtime {
             source: crate::sandbox::errors::RuntimeError::InitializationFailed {
                 message: format!("Failed to store SharedStateContext: {:?}", e),
+            },
+        })?;
+
+        ctx.store_userdata(StepIdContext::default()).map_err(|e| ExecutionError::Runtime {
+            source: crate::sandbox::errors::RuntimeError::InitializationFailed {
+                message: format!("Failed to store StepIdContext: {:?}", e),
             },
         })?;
 
@@ -1215,6 +1235,7 @@ function example() {
             metrics_context: None,
             llm_request_handler: None,
             shared_state_context: None,
+            step_id: None,
             runtime_event_callback: None,
             cancellation_flag: None,
             test_mode: false,
@@ -1237,6 +1258,84 @@ function example() {
             },
             Err(e) => panic!("Expected success, got error: {:?}", e),
         }
+    }
+
+    /// Concurrent JSSG steps with different step ids must keep their outputs isolated.
+    #[test]
+    fn test_concurrent_jssg_steps_isolate_step_outputs() {
+        fn codemod_for(marker: &str) -> String {
+            format!(
+                r#"
+import {{ setStepOutput }} from "codemod:workflow";
+
+export default async function transform(root) {{
+  setStepOutput("result", "{marker}");
+  return "{marker}";
+}}
+            "#
+            )
+            .trim()
+            .to_string()
+        }
+
+        fn run_step(step_id: &'static str) -> Result<CodemodOutput, ExecutionError> {
+            let (temp_dir, codemod_path) = setup_test_codemod(&codemod_for(step_id));
+            let resolver = Arc::new(OxcResolver::new(temp_dir.path().to_path_buf(), None).unwrap());
+            let options = JssgExecutionOptions {
+                script_path: &codemod_path,
+                resolver,
+                language: js_lang(),
+                file_path: Path::new("test.js"),
+                content: "const x = 1;",
+                selector_config: None,
+                params: None,
+                matrix_values: None,
+                capabilities: None,
+                semantic_provider: None,
+                metrics_context: None,
+                llm_request_handler: None,
+                shared_state_context: None,
+                step_id: Some(step_id.to_string()),
+                runtime_event_callback: None,
+                cancellation_flag: None,
+                test_mode: false,
+                dry_run: false,
+                target_directory: temp_dir.path(),
+            };
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("test runtime should build")
+                .block_on(execute_codemod_with_quickjs(options))
+        }
+
+        let (result_a, result_b) = std::thread::scope(|scope| {
+            let handle_a = scope.spawn(|| run_step("concurrent_step_a"));
+            let handle_b = scope.spawn(|| run_step("concurrent_step_b"));
+            (handle_a.join().unwrap(), handle_b.join().unwrap())
+        });
+
+        assert!(
+            result_a.is_ok(),
+            "step a execution should succeed: {:?}",
+            result_a.err()
+        );
+        assert!(
+            result_b.is_ok(),
+            "step b execution should succeed: {:?}",
+            result_b.err()
+        );
+
+        // Each step's output must be stored under its own step id.
+        let get = crate::workflow_global::get_step_output;
+        assert_eq!(
+            get("concurrent_step_a", "result").unwrap(),
+            Some("concurrent_step_a".to_string())
+        );
+        assert_eq!(
+            get("concurrent_step_b", "result").unwrap(),
+            Some("concurrent_step_b".to_string())
+        );
     }
 
     #[tokio::test]
@@ -1289,6 +1388,7 @@ export default async function transform() {
             metrics_context: None,
             llm_request_handler: Some(handler),
             shared_state_context: None,
+            step_id: None,
             runtime_event_callback: None,
             cancellation_flag: None,
             test_mode: false,
@@ -1359,6 +1459,7 @@ export default async function transform() {
             metrics_context: None,
             llm_request_handler: Some(handler),
             shared_state_context: None,
+            step_id: None,
             runtime_event_callback: None,
             cancellation_flag: None,
             test_mode: false,
@@ -1436,6 +1537,7 @@ export default function transform(root, options) {
             metrics_context: None,
             llm_request_handler: None,
             shared_state_context: None,
+            step_id: None,
             runtime_event_callback: None,
             cancellation_flag: None,
             test_mode: false,
@@ -1506,6 +1608,7 @@ export default function transform() {
             metrics_context: None,
             llm_request_handler: None,
             shared_state_context: None,
+            step_id: None,
             runtime_event_callback: None,
             cancellation_flag: None,
             test_mode: false,
@@ -1550,6 +1653,7 @@ export default function transform(root, options) {
             metrics_context: None,
             llm_request_handler: None,
             shared_state_context: None,
+            step_id: None,
             runtime_event_callback: None,
             cancellation_flag: None,
             test_mode: false,
@@ -1613,6 +1717,7 @@ function example() {
             metrics_context: None,
             llm_request_handler: None,
             shared_state_context: None,
+            step_id: None,
             runtime_event_callback: None,
             cancellation_flag: None,
             test_mode: false,
@@ -1666,6 +1771,7 @@ function example() {
             metrics_context: None,
             llm_request_handler: None,
             shared_state_context: None,
+            step_id: None,
             runtime_event_callback: None,
             cancellation_flag: None,
             test_mode: false,
@@ -1719,6 +1825,7 @@ function example() {
             metrics_context: None,
             llm_request_handler: None,
             shared_state_context: None,
+            step_id: None,
             runtime_event_callback: None,
             cancellation_flag: None,
             test_mode: false,
@@ -1764,6 +1871,7 @@ function example() {
             metrics_context: None,
             llm_request_handler: None,
             shared_state_context: None,
+            step_id: None,
             runtime_event_callback: None,
             cancellation_flag: None,
             test_mode: false,
@@ -1816,6 +1924,7 @@ function example() {
             metrics_context: None,
             llm_request_handler: None,
             shared_state_context: None,
+            step_id: None,
             runtime_event_callback: None,
             cancellation_flag: None,
             test_mode: false,
@@ -1927,6 +2036,7 @@ function example() {
             metrics_context: Some(metrics_ctx.clone()),
             llm_request_handler: None,
             shared_state_context: None,
+            step_id: None,
             runtime_event_callback: None,
             cancellation_flag: None,
             test_mode: false,
@@ -2007,6 +2117,7 @@ export default function transform(root) {
             metrics_context: None,
             llm_request_handler: None,
             shared_state_context: None,
+            step_id: None,
             runtime_event_callback: Some(runtime_event_callback),
             cancellation_flag: None,
             test_mode: false,
@@ -2055,6 +2166,7 @@ export default function transform(root) {
             metrics_context: None,
             llm_request_handler: None,
             shared_state_context: None,
+            step_id: None,
             runtime_event_callback: None,
             cancellation_flag: None,
             test_mode: false,
@@ -2103,6 +2215,7 @@ export default function transform(root) {
             metrics_context: None,
             llm_request_handler: None,
             shared_state_context: None,
+            step_id: None,
             runtime_event_callback: None,
             cancellation_flag: None,
             test_mode: false,
@@ -2151,6 +2264,7 @@ export default async function transform(root) {
             metrics_context: None,
             llm_request_handler: None,
             shared_state_context: None,
+            step_id: None,
             runtime_event_callback: None,
             cancellation_flag: None,
             test_mode: false,

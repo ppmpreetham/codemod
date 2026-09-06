@@ -22,4 +22,4 @@ pub use sandbox::engine::{
 };
 #[cfg(feature = "jssg-in-memory")]
 pub use sandbox::resolvers::{InMemoryLoader, InMemoryResolver};
-pub use workflow_global::SharedStateContext;
+pub use workflow_global::{SharedStateContext, StepIdContext};

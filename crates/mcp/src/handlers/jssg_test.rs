@@ -318,6 +318,7 @@ impl JssgTestHandler {
                         metrics_context: Some(metrics_context),
                         llm_request_handler: None,
                         shared_state_context: None,
+                        step_id: None,
                         runtime_event_callback: None,
                         cancellation_flag: None,
                         test_mode: true,

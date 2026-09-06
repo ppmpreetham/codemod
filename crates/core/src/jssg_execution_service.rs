@@ -667,9 +667,6 @@ impl<'a> JssgExecutionService<'a> {
                         StepPhase::FileLoaded,
                     );
                     Self::signal_progress(&progress_tx_for_closure);
-                    unsafe{
-                      std::env::set_var("CODEMOD_STEP_ID", &step_id);
-                    }
                     record_unit_progress(
                         &progress_state_for_closure,
                         &relative_path,
@@ -778,6 +775,7 @@ impl<'a> JssgExecutionService<'a> {
                         let metrics_context_owned = metrics_context_clone.clone();
                         let llm_request_handler_owned = llm_request_handler.clone();
                         let shared_state_context_owned = shared_state_context_clone.clone();
+                        let step_id_owned = step_id.clone();
                         let target_path_owned = target_path.clone();
                         let idle_timed_out = Arc::clone(&idle_timed_out_for_closure);
                         let idle_notify = Arc::clone(&idle_notify_for_closure);
@@ -800,6 +798,7 @@ impl<'a> JssgExecutionService<'a> {
                                         metrics_context: Some(metrics_context_owned),
                                         llm_request_handler: llm_request_handler_owned,
                                         shared_state_context: Some(shared_state_context_owned),
+                                        step_id: Some(step_id_owned),
                                         runtime_event_callback: Some(runtime_event_callback),
                                         cancellation_flag: Some(cancellation_flag_for_execution),
                                         test_mode: false,
